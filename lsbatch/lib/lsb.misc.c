@@ -279,6 +279,73 @@ sndJobFile_(int s, struct lenData *jf)
     return (0);
 } 
 
+/* 
+ * Pack all job files into a single lenData structure
+ * Format: [file_count(4bytes)] [file1_len(4bytes)] [file1_data] [file2_len(4bytes)] [file2_data] ...
+ */
+int 
+packAllJobFiles(struct lenData *jf_array, int job_count, struct lenData *packed)
+{
+    int totalSize = 4;  /* 4 bytes to store file count */
+    int offset = 0;
+    int nlen;
+    int i;
+    
+    if (!jf_array || !packed || job_count <= 0) {
+        return -1;
+    }
+    
+    /* Calculate total size */
+    for (i = 0; i < job_count; i++) {
+        totalSize += 4;  /* 4 bytes to store each file length */
+        totalSize += jf_array[i].len;  /* File data */
+    }
+    
+    if (logclass & (LC_TRACE | LC_EXEC))
+        ls_syslog(LOG_DEBUG, "packAllJobFiles: Packing %d job files, total size: %d bytes", 
+                  job_count, totalSize);
+    
+    /* Allocate memory */
+    packed->len = totalSize;
+    packed->data = malloc(totalSize);
+    if (!packed->data) {
+        ls_syslog(LOG_ERR, "packAllJobFiles: Memory allocation failed for %d bytes", totalSize);
+        return -1;
+    }
+    
+    /* Write file count (network byte order) */
+    nlen = htonl(job_count);
+    memcpy(packed->data + offset, &nlen, 4);
+    offset += 4;
+    
+    /* Write each file */
+    for (i = 0; i < job_count; i++) {
+        /* Write file length (network byte order) */
+        nlen = htonl(jf_array[i].len);
+        memcpy(packed->data + offset, &nlen, 4);
+        offset += 4;
+        
+        /* Write file data */
+        if (jf_array[i].len > 0 && jf_array[i].data) {
+            memcpy(packed->data + offset, jf_array[i].data, jf_array[i].len);
+            offset += jf_array[i].len;
+            if (logclass & LC_TRACE)
+                ls_syslog(LOG_DEBUG, "packAllJobFiles: Packed job %d file (%d bytes)", 
+                          i+1, jf_array[i].len);
+        } else {
+            if (logclass & LC_TRACE)
+                ls_syslog(LOG_DEBUG, "packAllJobFiles: Warning - Job %d file length is 0", i+1);
+        }
+    }
+    
+    if (logclass & (LC_TRACE | LC_EXEC))
+        ls_syslog(LOG_DEBUG, "packAllJobFiles: All job files packed successfully! Total size: %d bytes", 
+                  packed->len);
+    
+    return 0;
+}
+
+
  
 void
 upperStr(char *in, char *out)

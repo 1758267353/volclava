@@ -717,6 +717,147 @@ processClient(struct clientNode *client, int *needFree)
             setNextSchedTimeUponNewJob(jobData);
             statusChanged = 1;
             break;
+        
+         case BATCH_JOB_SUB_PACK:
+            {
+                static char fname_batch[] = "BATCH_JOB_SUB_PACK";
+                struct packSubmitReq packReq;
+                static int first = TRUE;
+                
+                /* 1. Decode batch request */
+                if (!xdr_packSubmitReq(&xdrs, &packReq, &reqHdr)) {
+                    ls_syslog(LOG_ERR, "%s: Failed to decode batch request from %s", 
+                             fname_batch, sockAdd2Str_(&from));
+                    break;
+                }
+                
+                ls_syslog(LOG_INFO, "%s: Processing %d batch jobs from %s", 
+                         fname_batch, packReq.jobCount, sockAdd2Str_(&from));
+                
+                
+                /* 2. Receive packed file data */
+                struct lenData packedFiles;
+                struct lenData *jf_array = NULL;
+                int fileCount = 0;
+                
+                /* Receive packed file data */
+                if (mbdRcvJobFile(s, &packedFiles) == -1) {
+                    ls_syslog(LOG_ERR, "%s: Failed to receive packed job files from %s", 
+                             fname_batch, sockAdd2Str_(&from));
+                    break;
+                }
+                
+                /* Unpack file data */
+                if (unpackJobFiles(&packedFiles, &jf_array, &fileCount) == -1) {
+                    ls_syslog(LOG_ERR, "%s: Failed to unpack job files from %s", 
+                             fname_batch, sockAdd2Str_(&from));
+                    if (packedFiles.data) free(packedFiles.data);
+                    break;
+                }
+                
+                if (packedFiles.data) {
+                    free(packedFiles.data);
+                }
+                
+                /* Verify file count */
+                if (fileCount != packReq.jobCount) {
+                    ls_syslog(LOG_ERR, "%s: File count mismatch: expected %d, got %d", 
+                             fname_batch, packReq.jobCount, fileCount);
+                    /* Cleanup unpacked files */
+                    if (jf_array) {
+                        for (int j = 0; j < fileCount; j++) {
+                            if (jf_array[j].data) free(jf_array[j].data);
+                        }
+                        free(jf_array);
+                    }
+                    break;
+                }
+                
+                /* 3. Prepare batch reply structure */
+                struct submitMbdReply *replyArray = (struct submitMbdReply *)
+                    calloc(packReq.jobCount, sizeof(struct submitMbdReply));
+                if (!replyArray) {
+                    ls_syslog(LOG_ERR, "%s: Failed to allocate reply array", fname_batch);
+                    /* Cleanup unpacked files */
+                    if (jf_array) {
+                        for (int j = 0; j < fileCount; j++) {
+                            if (jf_array[j].data) free(jf_array[j].data);
+                        }
+                        free(jf_array);
+                    }
+                    break;
+                }
+                
+                /* 4. Process each job */
+                ls_syslog(LOG_INFO, "%s: Processing %d batch jobs", fname_batch, packReq.jobCount);
+                int overallReply = LSBE_NO_ERROR;
+                for (int i = 0; i < packReq.jobCount; i++) {
+                    struct submitMbdReply *submitReply = &replyArray[i];
+                    struct jData *jobData = NULL;
+                    
+                    /* Initialize submitReply */
+                    initSubmit(&first, &packReq.jobs[i], submitReply);
+                    
+                    /* Create job with file data */
+                    int schedule = 0;
+                    int reply = newJobWithFile(&packReq.jobs[i], submitReply, &jf_array[i],
+                                               &auth, &schedule, LOG_IT, &jobData);
+                    
+                    if (reply == LSBE_NO_ERROR) {
+                        ls_syslog(LOG_INFO, "%s: Job %d created successfully, jobId=%lld", 
+                                 fname_batch, i, submitReply->jobId);
+                    } else {
+                        ls_syslog(LOG_ERR, "%s: Job %d creation failed, error=%d", 
+                                 fname_batch, i, reply);
+                        submitReply->jobId = 0;
+                        if (overallReply == LSBE_NO_ERROR) {
+                            overallReply = reply;
+                        }
+                    }
+                }
+                
+                /* 5. Send batch reply to client */
+                
+                char reply_buf[MSGSIZE];
+                XDR xdrs_reply;
+                struct LSFHeader replyHdr;
+                
+                xdrmem_create(&xdrs_reply, reply_buf, MSGSIZE, XDR_ENCODE);
+                replyHdr.opCode = overallReply;
+                
+                /* Encode first job reply (LSF traditional approach) */
+                if (!xdr_encodeMsg(&xdrs_reply, (char *)&replyArray[0], &replyHdr,
+                                   xdr_submitMbdReply, 0, NULL)) {
+                    ls_syslog(LOG_ERR, "%s: xdr_encodeMsg failed", fname_batch);
+                } else {
+                    int replyLen = XDR_GETPOS(&xdrs_reply);
+                    if (chanWrite_(s, reply_buf, replyLen) != replyLen) {
+                        ls_syslog(LOG_ERR, "%s: chanWrite_ failed, len=%d", fname_batch, replyLen);
+                    } else {
+                        ls_syslog(LOG_INFO, "%s: Successfully sent batch reply (%d bytes)", fname_batch, replyLen);
+                    }
+                }
+                xdr_destroy(&xdrs_reply);
+                
+                /* Cleanup reply array */
+                free(replyArray);
+                
+                /* Cleanup unpacked file data */
+                if (jf_array) {
+                    for (int j = 0; j < fileCount; j++) {
+                        if (jf_array[j].data) {
+                            free(jf_array[j].data);
+                        }
+                    }
+                    free(jf_array);
+                }
+                
+                ls_syslog(LOG_INFO, "%s: Completed batch processing for %d jobs from %s", 
+                         fname_batch, packReq.jobCount, sockAdd2Str_(&from));
+                statusChanged = 1;
+            }
+            break;
+            
         case BATCH_JOB_SIG:
             TIMEIT(0, do_signalReq(&xdrs, s, &from, client->fromHost, &reqHdr, &auth),"do_signalReq()");
             break;
