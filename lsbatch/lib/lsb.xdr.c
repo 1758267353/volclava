@@ -2041,3 +2041,114 @@ xdrsize_QueueInfoReply(struct queueInfoReply * qInfoReply)
     return len;
 }
 
+
+
+bool_t
+xdr_packSubmitReq(XDR *xdrs, struct packSubmitReq *packReq, struct LSFHeader *hdr)
+{
+
+    int i;
+    static int numJobs = 0;
+    static struct submitReq *jobs = NULL;
+    static char *sourceFile = NULL;
+    static char *batchName = NULL;
+    static int maxJobsLimit = DEF_LSB_MAX_PACK_JOBS;
+
+    if (xdrs->x_op == XDR_DECODE) {
+	if (numJobs > 0 && jobs) {
+	    for (i = 0; i < numJobs; i++) {
+		XDR freeXdr;
+		xdrmem_create(&freeXdr, NULL, 0, XDR_FREE);
+		xdr_submitReq(&freeXdr, &jobs[i], hdr);
+		xdr_destroy(&freeXdr);
+	    }
+	    FREEUP(jobs);
+	}
+	numJobs = 0;
+	jobs = NULL;
+	FREEUP(sourceFile);
+	FREEUP(batchName);
+	packReq->sourceFile = NULL;
+	packReq->batchName = NULL;
+	packReq->jobs = NULL;
+    }
+
+    if (xdrs->x_op == XDR_FREE) {
+	if (packReq->jobs && packReq->jobCount > 0) {
+	    for (i = 0; i < packReq->jobCount; i++) {
+		XDR freeXdr;
+		xdrmem_create(&freeXdr, NULL, 0, XDR_FREE);
+		xdr_submitReq(&freeXdr, &packReq->jobs[i], hdr);
+		xdr_destroy(&freeXdr);
+	    }
+	}
+	FREEUP(packReq->jobs);
+	FREEUP(packReq->sourceFile);
+	FREEUP(packReq->batchName);
+	return TRUE;
+    }
+
+    if (!(xdr_int(xdrs, &packReq->jobCount) &&
+	  xdr_int(xdrs, &packReq->options) &&
+	  xdr_int(xdrs, &packReq->maxConcurrency) &&
+	  xdr_time_t(xdrs, &packReq->clientTimestamp)))
+	return (FALSE);
+
+    if (xdrs->x_op == XDR_DECODE) {
+	if (packReq->jobCount <= 0 || packReq->jobCount > maxJobsLimit)
+	    return (FALSE);
+    }
+
+    if (!(xdr_var_string(xdrs, &packReq->sourceFile) &&
+	  xdr_var_string(xdrs, &packReq->batchName)))
+	return (FALSE);
+
+    if (xdrs->x_op == XDR_DECODE && packReq->jobCount > 0) {
+	packReq->jobs = (struct submitReq *)
+		calloc(packReq->jobCount, sizeof(struct submitReq));
+	if (packReq->jobs == NULL)
+	    return (FALSE);
+	for (i = 0; i < packReq->jobCount; i++) {
+	    memset(&packReq->jobs[i], 0, sizeof(struct submitReq));
+	    packReq->jobs[i].fromHost = (char *)malloc(MAXHOSTNAMELEN);
+	    packReq->jobs[i].jobFile = (char *)malloc(MAXFILENAMELEN);
+	    packReq->jobs[i].inFile = (char *)malloc(MAXFILENAMELEN);
+	    packReq->jobs[i].outFile = (char *)malloc(MAXFILENAMELEN);
+	    packReq->jobs[i].errFile = (char *)malloc(MAXFILENAMELEN);
+	    packReq->jobs[i].inFileSpool = (char *)malloc(MAXFILENAMELEN);
+	    packReq->jobs[i].commandSpool = (char *)malloc(MAXFILENAMELEN);
+	    packReq->jobs[i].cwd = (char *)malloc(MAXFILENAMELEN);
+	    packReq->jobs[i].subHomeDir = (char *)malloc(MAXFILENAMELEN);
+	    packReq->jobs[i].chkpntDir = (char *)malloc(MAXFILENAMELEN);
+	    packReq->jobs[i].hostSpec = (char *)malloc(MAXHOSTNAMELEN);
+	    if (!packReq->jobs[i].fromHost || !packReq->jobs[i].jobFile ||
+		!packReq->jobs[i].inFile || !packReq->jobs[i].outFile ||
+		!packReq->jobs[i].errFile || !packReq->jobs[i].cwd)
+		goto Error0;
+	}
+    }
+
+    for (i = 0; i < packReq->jobCount; i++) {
+	if (!xdr_arrayElement(xdrs, (char *) &(packReq->jobs[i]), hdr, xdr_submitReq, NULL)) {
+	    packReq->jobCount = i;
+	    goto Error0;
+	}
+    }
+
+    if (xdrs->x_op == XDR_DECODE) {
+	numJobs = packReq->jobCount;
+	jobs = packReq->jobs;
+	sourceFile = packReq->sourceFile;
+	batchName = packReq->batchName;
+    }
+    return (TRUE);
+
+Error0:
+    if (xdrs->x_op == XDR_DECODE) {
+	FREEUP(packReq->jobs);
+	FREEUP(packReq->sourceFile);
+	FREEUP(packReq->batchName);
+	packReq->jobCount = 0;
+    }
+    return (FALSE);
+}
